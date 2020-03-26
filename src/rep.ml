@@ -220,6 +220,7 @@ class type ['gene,'code] representation = object('self_type)
 
   (** @return atom_ids, a list of potentially-faulty atoms and their associated
       weights, or the "weighted path" if you prefer the old nomenclature *)
+  method get_blacklist_atoms : unit -> (atom_id * float) list
   method get_faulty_atoms : unit -> (atom_id * float) list
   method get_fix_source_atoms : unit -> (atom_id * float) list
 
@@ -305,6 +306,15 @@ class type ['gene,'code] representation = object('self_type)
   *)
   method compile : string -> string -> bool
 
+
+  (** generates a trampolined variant on disk.
+
+      @param source_name use the variant from this source name
+      @param exe_name create trampolined binary as this exe name
+      @return boolean denoting whether the compilation succeeded
+  *)
+  method trampoline : string -> string -> bool
+
   (** returns the number of tests run on this variant, including duplicates *)
   method num_evals : unit -> int
 
@@ -360,6 +370,10 @@ class type ['gene,'code] representation = object('self_type)
   *)
   method reduce_fix_space : unit -> unit
 
+  method blacklist_atoms : unit -> unit
+  method dont_repair_func_atoms : (atom_id * float) list -> unit
+  method print_fault_localization : unit -> unit
+
   (** specifies mutations that are allowed and their relative weightings,
       typically according to the search parameters
 
@@ -410,6 +424,7 @@ class type ['gene,'code] representation = object('self_type)
       append, swap, and replace find 'what to append' by looking in the code
       bank (aka stmt_map) -- *not* in the current variant. }} *)
 
+  method delete_sources : atom_id -> WeightSet.t
   (** Does the obvious thing
       @param atom_id to delete.  *)
   method delete : atom_id -> unit
@@ -525,12 +540,14 @@ let coverage_exename = "coverage"
 let sanity_filename = "repair.sanity"
 let sanity_exename = "./repair.sanity"
 let always_keep_source = ref false
+let trampoline_command = ref ""
 let compiler_command = ref ""
 let preprocess_command = ref ""
 let test_command = ref ""
 let flatten_path = ref "last"
 let compiler_name = ref "gcc"
 let compiler_options = ref ""
+let trampoline_compiler_options = ref ""
 let test_script = ref "./test.sh"
 let label_repair = ref false
 let use_subdirs = ref false
@@ -564,6 +581,9 @@ let coverage_info = ref ""
 let is_valgrind = ref false
 let partition   = ref (-1)
 
+let fix_whitelist_src_files = ref StringSet.empty
+let fix_blacklist_src_funcs = ref StringSet.empty
+
 let nht_server = ref ""
 let nht_port = ref 51000
 let nht_id = ref "global"
@@ -580,6 +600,13 @@ let sanity = ref "default"
 let ccfile = ref ""  (* path to code clone file *)
 
 let disable_aslr = ref false
+
+let func_repair = ref false
+let func_repair_binary = ref ""
+let func_repair_insert = ref ""
+let func_repair_fn_name = ref ""
+let func_repair_script = ref "funcinsert.py"
+let func_repair_stdiolib = ref "stdlibc-src/stdio_static.c"
 
 let _ =
   options := !options @
@@ -621,6 +648,7 @@ let _ =
                "X use X as compiler command";
 
                "--compiler-opts", Arg.Set_string compiler_options, "X use X as options";
+               "--trampoline-compiler-opts", Arg.Set_string trampoline_compiler_options, "X use X as compiler options for trampoline";
 
                "--preprocessor", Arg.Set_string preprocess_command,
                " preprocessor command. Default: __COMPILER_NAME__ -E __COMPILER_OPTIONS__" ;
@@ -659,6 +687,12 @@ let _ =
 
                "--fix-path-per-test", Arg.Set fix_path_per_test,
                "X Obtain Positive path coverage for each test.  Default: coverage.path.pos.<test id>";
+
+               "--blacklist-src-functions", Arg.String (fun arg -> fix_blacklist_src_funcs := StringSet.add arg !fix_blacklist_src_funcs),
+               "X Statement VIDs from these functions are not valid mutation destinations (can be specified multiple times)";
+
+               "--whitelist-src-files", Arg.String (fun arg -> fix_whitelist_src_files :=  StringSet.add arg !fix_whitelist_src_files),
+               "X Statement VIDs from these files are valid mutation sources (can be specified multiple times)";
 
                "--fix-file", Arg.Set_string fix_file,
                "X Fix localization information file, e.g., Lines/weights.";
@@ -1258,7 +1292,6 @@ class virtual ['gene,'code] cachingRepresentation = object (self : ('gene,'code)
 	else "setarch "^(read_process "uname -m")^" -R "^(cmd) in
     system local_cmd;
     
-
   method print_original_src fname = 
     let original_filename = (fname) ^ if (!Global.extension <> "")
         then !Global.extension
@@ -1304,29 +1337,62 @@ class virtual ['gene,'code] cachingRepresentation = object (self : ('gene,'code)
       Some(hfind fitness key)
     with Not_found -> None
 
-  method compile source_name exe_name =
-    let base_command = self#get_compiler_command () in
+  method trampoline source_name exe_name =
+    let base_command = self#get_trampoline_command () in
+      (*"__TRAMPOLINE_TOOL_NAME__ --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "*)
     let cmd = Global.replace_in_string base_command
         [
-          "__COMPILER_NAME__", !compiler_name ;
-          "__EXE_NAME__", exe_name ;
-          "__SOURCE_NAME__", source_name ;
-          "__COMPILER_OPTIONS__", !compiler_options ;
+          "__TRAMPOLINE_TOOL_NAME__", !func_repair_script ;
+          "__INPUT_BINARY__", !func_repair_binary ;
+          "__OUTPUT_BINARY__", exe_name ;
+          "__REPAIR_SOURCE_NAME__", source_name ;
+		  "__FUNC_NAME__", !func_repair_fn_name;
+          (*"__COMPILER_OPTIONS__", !compiler_options ;*)
         ]
     in
-    let result = (match Stats2.time "compile" system cmd with
+	debug "trampoline command: \n%s\n" cmd;
+    let result = (match Stats2.time "trampoline" system cmd with
         | Unix.WEXITED(0) ->
           already_compiled := Some(exe_name,source_name) ;
           true
         | _ ->
           already_compiled := Some("",source_name) ;
-          debug "\t%s %s fails to compile\n" source_name (self#name ()) ;
+          debug "\t%s %s fails to insert trampoline\n" source_name (self#name ()) ;
           incr compile_failures ;
           false
       ) in
     result
 
+  method compile source_name exe_name =
+	(* pemma TODO: add call to trampoline *)
+    if not !func_repair then begin
+        let base_command = self#get_compiler_command () in
+        let cmd = Global.replace_in_string base_command
+            [
+              "__COMPILER_NAME__", !compiler_name ;
+              "__EXE_NAME__", exe_name ;
+              "__SOURCE_NAME__", source_name ;
+              "__COMPILER_OPTIONS__", !compiler_options ;
+            ]
+        in
+        let result = (match Stats2.time "compile" system cmd with
+            | Unix.WEXITED(0) ->
+              already_compiled := Some(exe_name,source_name) ;
+              true
+            | _ ->
+              already_compiled := Some("",source_name) ;
+              debug "\t%s %s fails to compile\n" source_name (self#name ()) ;
+              incr compile_failures ;
+              false
+          ) in
+        result
+	end 
+	else begin
+	    self#trampoline source_name exe_name
+	end
+
   method preprocess source_name out_name =
+    if not !func_repair then begin
     let base_command = self#get_preprocess_command () in
     let cmd = Global.replace_in_string base_command
         [
@@ -1342,6 +1408,35 @@ class virtual ['gene,'code] cachingRepresentation = object (self : ('gene,'code)
         debug "\t%s %s fails to preprocess\n" source_name (self#name ()) ;
         false
     in
+    result
+	end 
+	else begin
+	    self#trampoline_preprocess source_name out_name
+	end
+
+  method trampoline_preprocess source_name out_name =
+    let base_command = self#get_trampoline_preprocess_command () in
+      (*"__TRAMPOLINE_TOOL_NAME__ --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "*)
+    let cmd = Global.replace_in_string base_command
+        [
+          "__COMPILER_NAME__", !compiler_name ;
+          "__TRAMPOLINE_COMPILER_OPTIONS__", !trampoline_compiler_options ;
+		  "__FUNCREPAIR_STDLIB__",Sys.getenv("FUNC_REPAIR_STDLIB");
+		  "__PWD__",Unix.getcwd ();
+          "__OUT_NAME__", out_name ;
+          "__SOURCE_NAME__", source_name ;
+          (*"__COMPILER_OPTIONS__", !compiler_options ;*)
+      (*"__COMPILER_NAME__ -E __SOURCE_NAME__ __TRAMPOLINE_COMPILER_OPTIONS__ > __OUT_NAME__"*)
+        ]
+    in
+	debug "trampoline preprocess command: \n%s\n" cmd;
+	system cmd;
+    let result = match system cmd with
+        | Unix.WEXITED(0) -> true
+        | _ ->
+          debug "\t%s %s fails to insert preprocess trampoline\n" source_name (self#name ()) ;
+          false
+       in
     result
 
   method num_evals () = snd eval_count
@@ -1539,12 +1634,25 @@ class virtual ['gene,'code] cachingRepresentation = object (self : ('gene,'code)
    * these serve to do the work of either compilation or caching. *)
   (***********************************)
 
+  method private get_trampoline_command () =
+    match !trampoline_command with
+    | "" ->
+      "__TRAMPOLINE_TOOL_NAME__ --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "^
+      "2>/dev/null >/dev/null"
+    |  x -> x
+
   method private get_compiler_command () =
     match !compiler_command with
     | "" ->
       "__COMPILER_NAME__ -o __EXE_NAME__ __SOURCE_NAME__ __COMPILER_OPTIONS__ "^
       "2>/dev/null >/dev/null"
     |  x -> x
+
+  method private get_trampoline_preprocess_command () =
+    match !preprocess_command with
+    | "" ->
+      "__COMPILER_NAME__ -E __SOURCE_NAME__ -I __FUNCREPAIR_STDLIB__ -I __PWD__ __TRAMPOLINE_COMPILER_OPTIONS__ > __OUT_NAME__"
+    | x -> x
 
   method private get_preprocess_command () =
     match !preprocess_command with
@@ -1798,6 +1906,7 @@ class virtual ['gene,'code] faultlocRepresentation = object (self)
      that they also need to be ref cells, but I just left them as-is. *)
   (* CLG: if they're mutable, they don't need to be refs, but I'm too lazy to
      change them all now *)
+  val mutable blacklist_localization = ref []
   val mutable fault_localization = ref []
   val mutable fix_localization = ref []
 
@@ -1832,6 +1941,7 @@ class virtual ['gene,'code] faultlocRepresentation = object (self)
 
   method copy () : 'self_type =
     let super_copy : 'self_type = super#copy () in
+    blacklist_localization <- ref !blacklist_localization ;
     fault_localization <- ref !fault_localization ;
     fix_localization   <- ref !fix_localization ;
     super_copy
@@ -1918,6 +2028,13 @@ class virtual ['gene,'code] faultlocRepresentation = object (self)
       fix_local;
     close_out fout
 
+  method get_blacklist_atoms () = !blacklist_localization
+
+  method is_in_blacklist atom_id = 
+	try 
+	List.exists(fun(id,w)-> id=atom_id) !blacklist_localization
+	with Not_found -> false
+
   method get_faulty_atoms () = !fault_localization
 
   method get_fix_source_atoms () = !fix_localization
@@ -1964,6 +2081,16 @@ class virtual ['gene,'code] faultlocRepresentation = object (self)
   (* particular representations, such as Cilrep, can override this
    * method to reduce the fix space *)
   method reduce_fix_space () = ()
+
+  method blacklist_atoms () = ()
+  method dont_repair_func_atoms atoms = ()
+
+  method print_fault_localization () =
+	   debug "rep: fault_localization atoms: ["; 
+       List.iter (fun (atom,w) ->
+            debug "%d;" atom
+          ) !fault_localization ;
+	   debug "]\n";
 
   method reduce_search_space split_fun do_uniq =
     (* there's no reason this can't do something to fix localization as well but
@@ -2029,7 +2156,8 @@ class virtual ['gene,'code] faultlocRepresentation = object (self)
       lfilt
         (fun (mutation,prob) ->
            match mutation with
-             Delete_mut -> true
+             Delete_mut ->
+             (WeightSet.cardinal (self#delete_sources mut_id)) > 0
            | Append_mut ->
              (* CLG FIXME/thought: cache the sources list? *)
              (WeightSet.cardinal (self#append_sources mut_id)) > 0
@@ -2041,9 +2169,10 @@ class virtual ['gene,'code] faultlocRepresentation = object (self)
            | Template_mut(s) -> (llen (self#template_available_mutations s mut_id)) > 0
         ) !mutations
     in
+	if self#is_in_blacklist mut_id then []
     (* Cannot cache available mutations if nested mutations are enabled; the
        set of applicable sources may change based on previous mutations. *)
-    if !do_nested then compute_available ()
+    else if !do_nested then compute_available ()
     else ht_find mutation_cache mut_id compute_available
 
   (***********************************)
@@ -2057,6 +2186,12 @@ class virtual ['gene,'code] faultlocRepresentation = object (self)
       templates := true
 
   method template_available_mutations str location_id =  []
+
+  method delete_sources x =
+    lfoldl
+      (fun weightset ->
+         fun (i,w) -> WeightSet.add (i,w) weightset) (WeightSet.empty) 
+		 (lfilt (fun(i,w) -> i=x) !fault_localization)
 
   method append_sources x =
     lfoldl
@@ -2503,8 +2638,17 @@ class virtual ['gene,'code] faultlocRepresentation = object (self)
             let baseline = self#get_atoms () in
             self#load_oracle !fix_oracle_file;
             AtomSet.diff (self#get_atoms ()) baseline
-          end else
-            self#get_atoms ()
+		  end else 
+		    if not (StringSet.is_empty !fix_whitelist_src_files) then begin
+		      let baseline = self#get_atoms () in
+                StringSet.iter(fun x -> self#load_oracle x) !fix_whitelist_src_files;
+		   	  let size = AtomSet.cardinal baseline in
+                debug "\nrep: source # of atoms %d\n" size;
+                debug "rep: whitelisted # of atoms %d\n" ((AtomSet.cardinal (self#get_atoms ()))-size);
+		  	    self#get_atoms ()
+			 
+            end else
+              self#get_atoms ()
         in
         set_fix (AtomSet.fold (fun id lst ->
             fix_fn id (1.0,1.0) lst

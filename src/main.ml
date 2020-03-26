@@ -92,6 +92,57 @@ let _ =
                "--disable-aslr", Arg.Set Rep.disable_aslr,
                " Disable ASLR during test runtime";
 
+               "--func-repair", Arg.Set Rep.func_repair,
+               " Enable Function-based repair";
+
+               "--func-repair-binary", Arg.Set_string Rep.func_repair_binary,
+               " Function-based repair => binary to insert repaired function into";
+
+               "--func-repair-insert", Arg.Set_string Rep.func_repair_insert,
+               " Function-based repair => insertion function input file";
+
+               "--func-repair-fn-name", Arg.Set_string Rep.func_repair_fn_name,
+               " Function-based repair => insertion function name";
+
+               "--func-repair-script", Arg.Set_string Rep.func_repair_script,
+               " Function-based repair => Script that compiles insertion function input file, inserts it into binary to be repaired, and updates binary to call inserted function";
+			   (* note from pdr-
+			   for funcinsert => expecting to invoke something like:
+			   funcinsert.py 
+			   --bin func_repair_binary    <= this is the input binary
+			   --outbin repaired_binary    <= this is the patched binary file to be written
+			   --fn func_repair_insert     <= this is the file containing the "inserted" function
+			   func_repair_fn_name         <= this is the function to be used from "inserted"
+			                                  instead of the function from input binary
+			   
+				=> funcrepair_bin
+
+			   HIGH LEVEL FUNC-REPAIR IDEA:
+			   1) Sanity Check-
+			        a) Take original "func_repair_insert" and run funcinsert.py on it and the 
+					"func_repair_binary" input binary file with the patched function 
+					=> funcrepair_bin
+					b) Run test suite on funcrepair_bin as Sanity Check
+			   2) POPULATE and COVERAGE: FUNC_AST
+			        a) read input file "func_repair_insert"  => func_ast
+					b) generate coverage.c using func_ast
+					    i)   need to include "stdio-override/printf.c" instead of stdio.h
+						ii)  need to change fopen from FILE* type to int (file descriptor)
+						iii) need to change if _coverage_fout == 0 ??? MAYBE????
+					c) run funcinsert (func_repair_binary, coverage.c, func_repair_fn_name)
+					   => funcrepair_bin
+					d) run test suite using funcrepair_bin and collect coverage
+               3) MUTATE AND TEST: FUNC_AST
+			        a) mutate func_ast => func_ast'
+					    i)  only use mutations from func_ast
+						ii) populate mutation set with external mutational content
+						      ----> HOWTO control size of mutation set <---- ??????
+					b) generate func.c using func_ast'
+					c) run funcinsert (func_repair_binary,func.c, func_repair_fn_name)
+					   => funcrepair_bin
+					d) run test suite using funcrepair_bin
+			   *)
+
              ]
 
 

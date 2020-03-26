@@ -500,6 +500,9 @@ let initialize_ga
   if (not !disable_reduce_fix_space) then
     original#reduce_fix_space ();
 
+  original#blacklist_atoms ();
+  (*original#print_fault_localization () ;*)
+
   original#register_mutations
     [(Delete_mut,!del_prob); (Append_mut,!app_prob);
      (Swap_mut,!swap_prob); (Replace_mut,!rep_prob);

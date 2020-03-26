@@ -111,6 +111,7 @@ let cilRep_version = "17"
     If this state is not reset, every parse after one that has a parse
     error will mistakenly die. *)
 let cil_parse file_name =
+  debug "cil_parsing %s\n" file_name;
   Errormsg.hadErrors := false ; (* critical! *)
   Frontc.parse file_name ()
 
@@ -122,7 +123,7 @@ type cilRep_atom =
     of type [ast_info].  *)
 type ast_info =
   { code_bank : Cil.file StringMap.t ;
-    (** program code: maps filenames to ASTs *)
+	(** program code: maps filenames to ASTs *)
     oracle_code : Cil.file StringMap.t ;
     (** additional/external code: maps filenames to ASTs *)
     fault_localization : (atom_id * float) list
@@ -428,13 +429,41 @@ class cannotRepairVisitor atomsetref = object
 end
 let my_cannotrepair = new cannotRepairVisitor
 
+class blacklistRepairVisitor faultsetref = object
+  inherit nopCilVisitor
+  val mutable check_function = false
+  method vstmt s =
+    (
+	  if s.sid <> 0 && check_function then faultsetref := IntSet.add s.sid !faultsetref
+	) ;
+    DoChildren
+  method vfunc fd = (* function definition *)
+	(
+    if StringSet.exists (fun x -> x = fd.svar.vname) !Rep.fix_blacklist_src_funcs then
+				  (*
+                  IntSet.exists (fun vid -> let vinfo = IntMap.find vid !varmap in
+                                  (* possible FIXME: I never remember
+                                     if string compare should be
+                                     single or double equal *)
+                                  vinfo.vname = v) (stmt_info.usedvars)
+								  *)
+	  check_function<-true
+    else
+	  check_function<-false
+	);
+    DoChildren
+
+end
+let my_blacklistrepair = new blacklistRepairVisitor
+
 (** This visitor extracts all variable declarations from a piece of AST.
 
     @param setref reference to an IntSet.t where the info is stored.  *)
-class varinfoVisitor varsetref funsetref = object
+class varinfoVisitor varsetref funsetref fnnameref = object
   inherit nopCilVisitor
   method vfunc fd =
     funsetref := IntMap.add fd.svar.vid fd !funsetref ;
+    fnnameref := StringMap.add fd.svar.vname fd !fnnameref ;
     DoChildren
   method vvdec va =
     varsetref := IntMap.add va.vid va !varsetref ;
@@ -687,6 +716,8 @@ let my_num max_id = new numVisitor max_id (ref (!max_id + 1)) unexpected_num
 (**/**)
 let void_t = Formatcil.cType "void *" []
 
+let int_t = Formatcil.cType "int" []
+
 (* For most functions, we would like to use the prototypes as defined in the
    standard library used for this compiler. We do this by preprocessing a simple
    C file and extracting the prototypes from there. Since this should only
@@ -699,7 +730,7 @@ let va_table = Hashtbl.create 10
 
 let fill_va_table = ref 
    ((fun () -> failwith "fill_va_table uninitialized") : unit ->
-     (string -> (Global.StringMap.key * Cil.formatArg) list -> Cil.stmt) *
+     (string -> (Global.StringMap.key * Cil.formatArg) list -> Cil.stmt ) *
      Cil.global list Global.StringMap.t)
 
 
@@ -710,7 +741,13 @@ let uniq_int_va = ref
     (makeGlobalVar "___coverage_array_already_memset" (Cil.intType))
 
 let do_not_instrument_these_functions =
-  [ "fflush" ; "memset" ; "fprintf" ; "fopen" ; "fclose" ; "vgPlain_fmsg" ; "vgPlain_memset" ]
+  [ "fflush" ; "memset" ; "fprintf" ; "fopen" ; "fclose" ; "vgPlain_fmsg" ; "vgPlain_memset" 
+		  ; "gp_fopen"; "gp_fclose"; "gp_fflush"; "gp_fprintf"
+          ; "_open"; "_open_mode"; "_write"; "_exit"; "vfprintf";  "printf"; "_close"
+  	; "convert"; "strlen"; "strcpy"
+  (*
+  *)
+  ]
 
 (**/**)
 
@@ -764,6 +801,7 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
         end
       | _ -> ChangeDoChildrenPost([g], fun gs -> gs)
 
+
     method vblock b =
       ChangeDoChildrenPost(b,(fun b ->
           let result = List.map (fun stmt ->
@@ -778,8 +816,18 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
                   if !is_valgrind then
                     "vgPlain_fmsg(%g:str);"
                   else
+				    if not !Rep.func_repair then
                     "fprintf(fout, %g:str);\n"^
                     "fflush(fout);\n"
+					else
+                    "fout = gp_fopen(%g:fout_g, %g:a_arg );\n"^
+					(*
+                    "fprintf(fout, %g:str);\n"^
+                    "fflush(fout);\n"^
+					*)
+                    "gp_fprintf(fout, %g:str);\n"^
+                    "gp_fflush(fout);\n"^
+					"gp_fclose(fout);\n"
                 in
                 let print_str =
                   if !uniq_coverage then
@@ -790,14 +838,16 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
                     print_str
                 in
                 let print_str =
-                  if !multithread_coverage then
+                  if !multithread_coverage && not !Rep.func_repair then
                     "fout = fopen(%g:fout_g, %g:a_arg);\n"^print_str^"fclose(fout);\n"
                   else
-                    print_str
+                      print_str
+
                 in
                 let newstmt = cstmt print_str
                     [("uniq_array", Fv(!uniq_array_va));("fout_g",Fg coverage_outname);
-                     ("index", Fd (stmt.sid)); ("str",Fg(str))]
+                     ("index", Fd (stmt.sid)); ("a_arg", Fg("a")); ("str",Fg(str));
+					 ]
                 in
                 [ newstmt ; stmt ]
               end else [stmt]
@@ -820,7 +870,8 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
             f.svar.vdecl.file f.svar.vdecl.line ;
           debug "\tcannot instrument for coverage (would be recursive)\n";
           SkipChildren
-        end else if not !multithread_coverage then begin
+        end else begin
+		if not !multithread_coverage then begin
           let uniq_instrs =
             if !uniq_coverage then
               let memset_str =
@@ -835,15 +886,37 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
               uniq_instrs
             else
               "if (fout == 0) {\n fout = fopen(%g:fout_g,%g:wb_arg);\n"^uniq_instrs^"}"
+			  (*
+			  if not !Rep.func_repair then
+              "if (fout == 0) {\n fout = fopen(%g:fout_g,%g:wb_arg);\n"^uniq_instrs^"}"
+			  else
+			  (* 
+			  note from pdr - I'm inlining the fopen/fprintf/fflush/fclose
+              "if (fout == 0) {\n fout = fopen(%g:fout_g,%g:a_arg);\n"^uniq_instrs^"\nfclose(fout);\n}"
+			  *)
+              "if (fout == 0) {\n fout = gp_fopen(%g:fout_g,%g:a_arg);\n"^uniq_instrs^"\n}"
+			  *)
           in
           let ifstmt = cstmt stmt_str
               [("uniq_array", Fv(!uniq_array_va));("fout_g",Fg coverage_outname); ("uniq_int", Fv(!uniq_int_va))]
           in
+    	  if !Rep.func_repair then begin
+    	    (*    TODO PEMMA create local variable _coverage_fout and initialize it to 0
+    	    *)
+    	    let vi = makeVarinfo false "_coverage_fout" int_t in 
+    	      f.slocals <- vi :: f.slocals;
+    	      let init_fout = mkStmt (Instr[Set(var vi, integer 0, !currentLoc)]) in 
+          ChangeDoChildrenPost(f,
+                               (fun f ->
+                                  f.sbody.bstmts <- init_fout :: f.sbody.bstmts;
+                                  f))
+    	  end else 
           ChangeDoChildrenPost(f,
                                (fun f ->
                                   f.sbody.bstmts <- ifstmt :: f.sbody.bstmts;
                                   f))
         end else DoChildren
+		end
       end else SkipChildren
   end
 
@@ -1625,6 +1698,9 @@ class virtual ['gene] cilRep  = object (self : 'self_type)
   (** Maps variable IDs to the corresponding fundec object *)
   val mutable fix_funmap : fundec IntMap.t ref = ref IntMap.empty
 
+  (** Map function names to the corresponding fundec object *)
+  val mutable fix_name2funmap : fundec StringMap.t ref = ref StringMap.empty
+
   method copy () : 'self_type =
     let super_copy : 'self_type = super#copy () in
     (* Don't create a copy of stmt_count, stmt_data, or varmap. They should
@@ -1726,6 +1802,62 @@ class virtual ['gene] cilRep  = object (self : 'self_type)
   method private get_fault_space_info sid =
     hfind stmt_data sid
 
+  (* use blacklisted functions from !Rep. 
+	 to reduce fault_localization List
+  *) 
+	  (* add blacklisted function atoms *)
+  method blacklist_atoms ()  =
+    super#blacklist_atoms ();
+      debug "cilRep: blacklist_atoms\n";
+      debug "cilRep: # of blacklist functions: %d\n" (StringSet.cardinal !Rep.fix_blacklist_src_funcs);
+      debug "cilRep: blacklist functions -> [%s] \n" (String.concat ";" (StringSet.elements !Rep.fix_blacklist_src_funcs));
+	  let dont_repair = ref IntSet.empty in
+	    StringMap.iter (fun _ file ->
+		  visitCilFileSameGlobals (my_blacklistrepair dont_repair) file ;
+		) (self#get_source_files ()) ;
+      (*let blacklist_localization = ref [] in *)
+	  IntSet.iter (fun x -> blacklist_localization := (x,0.0) :: !blacklist_localization) !dont_repair;
+	  let dont_repair = !dont_repair in 
+	   debug "cilRep: # of atoms in original fault_localization: %d\n" 
+	     (List.length !fault_localization) ;
+	   debug "cilRep: # of atoms in blacklisted functions: %d\n" 
+	     (IntSet.cardinal dont_repair) ;
+	   debug "cilRep: atoms in blacklisted functions: ["; 
+	   IntSet.iter (fun x -> debug "%d;" x)  dont_repair;
+	   debug "]\n";
+	  (*
+	  fix_localization :=
+        List.filter (fun (atom,w) ->
+            not (IntSet.mem atom dont_repair)
+          ) !fix_localization ;
+      fault_localization :=
+        List.filter (fun (atom,w) ->
+            not (IntSet.mem atom dont_repair)
+          ) !fault_localization ;
+	   debug "cilRep: atoms in blacklisted functions: ["; 
+	   IntSet.iter (fun x -> debug "%d;" x)  dont_repair;
+	   debug "]\n";
+	   debug "cilRep: fault_localization atoms: ["; 
+       List.iter (fun (atom,w) ->
+            debug "%d;" atom
+          ) !fault_localization ;
+	   debug "]\n";
+	   *)
+	   self#dont_repair_func_atoms !blacklist_localization;
+	   debug "cilRep: # of atoms in reduced fault_localization: %d\n" 
+	     (List.length !fault_localization) ;
+
+    debug "cilRep: blacklist_atoms end\n";
+
+	  
+  method dont_repair_func_atoms atoms = 
+      let dont_repair = ref IntSet.empty in
+	     List.iter (fun (atom,w) -> dont_repair := IntSet.add atom !dont_repair) atoms;
+      fault_localization :=
+        List.filter (fun (atom,w) ->
+            not (IntSet.mem atom !dont_repair)
+          ) !fault_localization ;
+
   (* Use an approximation to the program equivalence relation to
    * remove duplicate edits (i.e., those that would yield semantically
    * equivalent programs) from consideration. Command line arguments
@@ -1755,6 +1887,7 @@ class virtual ['gene] cilRep  = object (self : 'self_type)
         List.filter (fun (atom,w) ->
             not (IntSet.mem atom cannot_repair)
           ) !fix_localization ;
+
     end ;
 
     let original_fixes = List.length !fix_localization in
@@ -2061,7 +2194,7 @@ class virtual ['gene] cilRep  = object (self : 'self_type)
       @param filename string with extension .txt, .c, .i, .cu, .cu
       @raise Fail("unexpected file extension") if given anything else
   *)
-  method from_source (filename : string) = begin
+  method from_source  (filename : string) = begin
     debug "cilrep: from_source: pre: stmt_count = %d\n" (AtomSet.cardinal (self#get_atoms()));
     let _,ext = split_ext filename in
     let code_bank =
@@ -2126,7 +2259,7 @@ class virtual ['gene] cilRep  = object (self : 'self_type)
     let file = self#internal_parse full_filename in
     visitCilFileSameGlobals (new everyVisitor) file ;
     visitCilFileSameGlobals (new emptyVisitor) file ;
-    visitCilFileSameGlobals (new varinfoVisitor varmap fix_funmap) file ;
+    visitCilFileSameGlobals (new varinfoVisitor varmap fix_funmap fix_name2funmap) file ;
     (* Second, number all statements and keep track of
      * in-scope variables information. *)
     visitCilFileSameGlobals my_zero file;
@@ -2162,6 +2295,7 @@ class virtual ['gene] cilRep  = object (self : 'self_type)
 
   method compute_localization () =
     super#compute_localization ();
+    self#dont_repair_func_atoms !blacklist_localization;
     global_ast_info := {!global_ast_info with
                         fault_localization = !fault_localization}
 
@@ -3138,6 +3272,7 @@ class patchCilRep = object (self : 'self_type)
                variant is written...*)
             label_counter := 0;
             fault_localization := !global_ast_info.fault_localization ;
+	        self#dont_repair_func_atoms !blacklist_localization;
             copy !global_ast_info.code_bank, [], self#get_genome()
         in
         List.iter (fun gene ->
@@ -3467,14 +3602,27 @@ end
 let _ =
   fill_va_table := (fun () ->
       let vnames =
-        [ "fclose"; "fflush"; "fopen"; "fprintf"; "memset"; "vgPlain_fmsg"; "_coverage_fout" ; "vgPlain_memset" ]
+        [ "fclose"; "fflush"; "fopen"; "fprintf"; "memset"; "vgPlain_fmsg"; "_coverage_fout" ; "vgPlain_memset"
+		  ; "gp_fopen"; "gp_fclose"; "gp_fflush"; "gp_fprintf"
+		  (*; "_open"; "_open_mode"; "_write"; "_exit"; "vfprintf";  "printf"; "_close"*)
+		]
       in
       if Hashtbl.length va_table = 0 then begin
         let source_file, chan = Filename.open_temp_file "tmp" ".c" in
-        Printf.fprintf chan "#include <stdio.h>\n";
-        Printf.fprintf chan "#include <string.h>\n";
-        Printf.fprintf chan "FILE * _coverage_fout;\n";
-        Printf.fprintf chan "int main() { return 0; }\n";
+		(* pemma:TODO add rep.funcrepair *)
+		if !Rep.func_repair then begin
+            Printf.fprintf chan "#include <%s>\n" !Rep.func_repair_stdiolib;
+		   (* note from pdr - I'm inlining the _coverage_fout : fopen/fprintf/fflush/fclose
+		      the following global variable shouldnt be used
+            Printf.fprintf chan "int _coverage_fout;\n";
+		   *)
+            Printf.fprintf chan "int main() { return 0; }\n";
+		end else begin
+            Printf.fprintf chan "#include <stdio.h>\n";
+            Printf.fprintf chan "#include <string.h>\n";
+            Printf.fprintf chan "FILE * _coverage_fout;\n";
+            Printf.fprintf chan "int main() { return 0; }\n";
+		end;
         close_out chan;
         let temp_variant = (new patchCilRep) in
 
@@ -3492,7 +3640,7 @@ let _ =
             let cilfile =
               try cil_parse preprocessed
               with e ->
-                debug "cilrep: fill_va_table: Frontc.parse: %s\n"
+                debug "\ncilrep: fill_va_table: Frontc.parse: %s\n"
                   (Printexc.to_string e) ; raise e
             in
             if !Errormsg.hadErrors then
@@ -3525,7 +3673,7 @@ let _ =
               )
           with Frontc.ParseError(msg) ->
             begin
-              debug "cilRep: fill_va_table: %s\n" msg;
+              debug "\ncilRep: fill_va_table: %s\n" msg;
               Errormsg.hadErrors := false
             end
         end;
@@ -3535,8 +3683,12 @@ let _ =
       let static_args = lfoldl (fun lst x ->
           let is_fout = x = "_coverage_fout" in
           if not (Hashtbl.mem va_table x) then begin
+		    if not !Rep.func_repair && not is_fout then 
             let vi = makeVarinfo true x void_t in
             Hashtbl.add va_table x (vi, [GVarDecl(vi,locUnknown)], is_fout)
+			else
+            let vi = makeVarinfo true x int_t in
+            Hashtbl.add va_table x (vi, [GVarDecl(vi,locUnknown)], false)
           end;
           let name = if is_fout then "fout" else x in
           let vi, _, _ = Hashtbl.find va_table x in
@@ -3546,6 +3698,15 @@ let _ =
       let cstmt stmt_str args =
         Formatcil.cStmt ("{"^stmt_str^"}") (fun _ -> failwith "no new varinfos!")  !currentLoc
           (args@static_args)
+		(*
+		if not !Rep.func_repair then begin
+        Formatcil.cStmt ("{"^stmt_str^"}") (fun _ -> failwith "no new varinfos!")  !currentLoc
+          (args@static_args)
+		end else begin
+        Formatcil.cStmts ("{"^stmt_str^"}") (fun _ -> failwith "no new varinfos!")  !currentLoc
+          (args@static_args)
+		end
+	    *)
       in
       let global_decls = lfoldl (fun decls x ->
           match Hashtbl.find va_table x with
