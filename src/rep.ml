@@ -1339,10 +1339,11 @@ class virtual ['gene,'code] cachingRepresentation = object (self : ('gene,'code)
 
   method trampoline source_name exe_name =
     let base_command = self#get_trampoline_command () in
-      (*"__TRAMPOLINE_TOOL_NAME__ --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "*)
+      (*"__TRAMPOLINE_TOOL_NAME__ --hook-cflags __TRAMPOINE_COMPILER_OPTIONS__ --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "*)
     let cmd = Global.replace_in_string base_command
         [
           "__TRAMPOLINE_TOOL_NAME__", !func_repair_script ;
+          "__TRAMPOLINE_COMPILER_OPTIONS__", !trampoline_compiler_options ;
           "__INPUT_BINARY__", !func_repair_binary ;
           "__OUTPUT_BINARY__", exe_name ;
           "__REPAIR_SOURCE_NAME__", source_name ;
@@ -1637,7 +1638,7 @@ class virtual ['gene,'code] cachingRepresentation = object (self : ('gene,'code)
   method private get_trampoline_command () =
     match !trampoline_command with
     | "" ->
-      "__TRAMPOLINE_TOOL_NAME__ --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "^
+      "__TRAMPOLINE_TOOL_NAME__ --hook-cflags '__TRAMPOLINE_COMPILER_OPTIONS__' --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "^
       "2>/dev/null >/dev/null"
     |  x -> x
 
