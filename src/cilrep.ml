@@ -747,8 +747,13 @@ let do_not_instrument_these_functions =
   	; "convert"; "strlen"; "strcpy"
   (*
   *)
-  ]
+  ] 
 
+
+let printme=
+    debug "do_not_instrument_these_functions= ";
+    (List.iter (debug "%s, ") do_not_instrument_these_functions);
+    debug "\n";
 (**/**)
 
 (** Visitor for computing statement coverage (for a "weighted path"); walks over
@@ -817,17 +822,16 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
                     "vgPlain_fmsg(%g:str);"
                   else
 				    if not !Rep.func_repair then
+                    "fprintf(fout, %g:str);\n"
+					else
                     "fprintf(fout, %g:str);\n"^
                     "fflush(fout);\n"
-					else
-                    "fout = gp_fopen(%g:fout_g, %g:a_arg );\n"^
 					(*
-                    "fprintf(fout, %g:str);\n"^
-                    "fflush(fout);\n"^
-					*)
+                    "fout = gp_fopen(%g:fout_g, %g:a_arg );\n"^
                     "gp_fprintf(fout, %g:str);\n"^
                     "gp_fflush(fout);\n"^
 					"gp_fclose(fout);\n"
+					*)
                 in
                 let print_str =
                   if !uniq_coverage then
@@ -865,7 +869,9 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
 
     method vfunc f =
       if !found_fmsg then begin
-        if List.mem f.svar.vname do_not_instrument_these_functions then begin
+        (* pemma need to add if this is the entry function *)
+        let no_instrumentation = do_not_instrument_these_functions@(StringSet.elements !Rep.do_not_instrument) in
+        if List.mem f.svar.vname no_instrumentation then begin
           debug "cilRep: WARNING: definition of fprintf found at %s:%d\n"
             f.svar.vdecl.file f.svar.vdecl.line ;
           debug "\tcannot instrument for coverage (would be recursive)\n";
@@ -900,6 +906,7 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
           let ifstmt = cstmt stmt_str
               [("uniq_array", Fv(!uniq_array_va));("fout_g",Fg coverage_outname); ("uniq_int", Fv(!uniq_int_va))]
           in
+          (*
     	  if !Rep.func_repair then begin
     	    (*    TODO PEMMA create local variable _coverage_fout and initialize it to 0
     	    *)
@@ -911,6 +918,7 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
                                   f.sbody.bstmts <- init_fout :: f.sbody.bstmts;
                                   f))
     	  end else 
+          *)
           ChangeDoChildrenPost(f,
                                (fun f ->
                                   f.sbody.bstmts <- ifstmt :: f.sbody.bstmts;
@@ -3611,11 +3619,17 @@ let _ =
         let source_file, chan = Filename.open_temp_file "tmp" ".c" in
 		(* pemma:TODO add rep.funcrepair *)
 		if !Rep.func_repair then begin
-            Printf.fprintf chan "#include <%s>\n" !Rep.func_repair_stdiolib;
+        
 		   (* note from pdr - I'm inlining the _coverage_fout : fopen/fprintf/fflush/fclose
 		      the following global variable shouldnt be used
             Printf.fprintf chan "int _coverage_fout;\n";
 		   *)
+		   (* note from pdr - this is no longer needed!!!! 
+		    we are using gcc + dietlibc or clang for AFR now *)
+
+           (*  Printf.fprintf chan "#include <%s>\n" !Rep.func_repair_stdiolib;*)
+            Printf.fprintf chan "#include <stdio.h>\n";
+            Printf.fprintf chan "FILE * _coverage_fout;\n";
             Printf.fprintf chan "int main() { return 0; }\n";
 		end else begin
             Printf.fprintf chan "#include <stdio.h>\n";

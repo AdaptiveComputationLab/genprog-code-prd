@@ -106,6 +106,8 @@ let _ =
 
                "--func-repair-script", Arg.Set_string Rep.func_repair_script,
                " Function-based repair => Script that compiles insertion function input file, inserts it into binary to be repaired, and updates binary to call inserted function";
+               "--do-not-instrument", Arg.String (fun arg -> Rep.do_not_instrument := StringSet.add arg !Rep.do_not_instrument),
+               "Additional set of functions that should not be instrumented";
 			   (* note from pdr-
 			   for funcinsert => expecting to invoke something like:
 			   funcinsert.py 

@@ -548,6 +548,8 @@ let flatten_path = ref "last"
 let compiler_name = ref "gcc"
 let compiler_options = ref ""
 let trampoline_compiler_options = ref ""
+let trampoline_nodietlibc = ref false
+let trampoline_debug = ref false
 let test_script = ref "./test.sh"
 let label_repair = ref false
 let use_subdirs = ref false
@@ -606,7 +608,8 @@ let func_repair_binary = ref ""
 let func_repair_insert = ref ""
 let func_repair_fn_name = ref ""
 let func_repair_script = ref "funcinsert.py"
-let func_repair_stdiolib = ref "stdlibc-src/stdio_static.c"
+(*let func_repair_stdiolib = ref "stdlibc-src/stdio_static.c"*)
+let do_not_instrument = ref StringSet.empty
 
 let _ =
   options := !options @
@@ -650,6 +653,8 @@ let _ =
                "--compiler-opts", Arg.Set_string compiler_options, "X use X as options";
                "--trampoline-compiler-opts", Arg.Set_string trampoline_compiler_options, "X use X as compiler options for trampoline";
 
+               "--trampoline-nodietlibc", Arg.Set trampoline_nodietlibc, " disable diet libc for trampoline command";
+               "--trampoline-debug", Arg.Set trampoline_debug, " enable debug printing for trampoline command";
                "--preprocessor", Arg.Set_string preprocess_command,
                " preprocessor command. Default: __COMPILER_NAME__ -E __COMPILER_OPTIONS__" ;
 
@@ -1339,10 +1344,15 @@ class virtual ['gene,'code] cachingRepresentation = object (self : ('gene,'code)
 
   method trampoline source_name exe_name =
     let base_command = self#get_trampoline_command () in
-      (*"__TRAMPOLINE_TOOL_NAME__ --hook-cflags __TRAMPOINE_COMPILER_OPTIONS__ --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "*)
+      (*"__TRAMPOLINE_TOOL_NAME__ --compiler __TRAMPOLINE_COMPILER__ --hook-cflags __TRAMPOINE_COMPILER_OPTIONS__ --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "*)
+	let script=  ((!func_repair_script) ^
+	    if (!trampoline_nodietlibc) then " --nodietlibc " else "" )
+		^ if (!trampoline_debug) then " --debug " else ""
+		in
     let cmd = Global.replace_in_string base_command
         [
-          "__TRAMPOLINE_TOOL_NAME__", !func_repair_script ;
+		  "__TRAMPOLINE_COMPILER__", !compiler_name ;
+          "__TRAMPOLINE_TOOL_NAME__", script ;
           "__TRAMPOLINE_COMPILER_OPTIONS__", !trampoline_compiler_options ;
           "__INPUT_BINARY__", !func_repair_binary ;
           "__OUTPUT_BINARY__", exe_name ;
@@ -1638,7 +1648,7 @@ class virtual ['gene,'code] cachingRepresentation = object (self : ('gene,'code)
   method private get_trampoline_command () =
     match !trampoline_command with
     | "" ->
-      "__TRAMPOLINE_TOOL_NAME__ --hook-cflags '__TRAMPOLINE_COMPILER_OPTIONS__' --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "^
+      "__TRAMPOLINE_TOOL_NAME__ --compiler __TRAMPOLINE_COMPILER__ --hook-cflags '__TRAMPOLINE_COMPILER_OPTIONS__' --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "^
       "2>/dev/null >/dev/null"
     |  x -> x
 
