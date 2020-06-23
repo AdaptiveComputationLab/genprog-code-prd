@@ -234,6 +234,8 @@ let brute_force_1 (original : ('a,'b) Rep.representation) incoming_pop =
     debug "search: reduce_fix_space\n";
     original#reduce_fix_space () ;
   end;
+  original#print_fault_localization () ;
+  original#print_fix_localization () ;
 
   debug "search: brute_force_1 begins\n";
   original#register_mutations [
@@ -333,8 +335,11 @@ let brute_force_1 (original : ('a,'b) Rep.representation) incoming_pop =
         if test_to_first_failure rep then begin
           note_success rep original (-1);
           incr wins;
-          if not !continue then
+          if not !continue then begin
+            debug "\tvariant %d/%d/%d (w: %g) %s\n"
+              !wins !sofar count w (rep#name ());
             raise (Found_repair(rep#name ()))
+		  end;
         end;
         debug "\tvariant %d/%d/%d (w: %g) %s\n"
           !wins !sofar count w (rep#name ());
@@ -502,6 +507,8 @@ let initialize_ga
 
   original#blacklist_atoms ();
   (*original#print_fault_localization () ;*)
+  original#print_fault_localization () ;
+  original#print_fix_localization () ;
 
   original#register_mutations
     [(Delete_mut,!del_prob); (Append_mut,!app_prob);

@@ -373,6 +373,7 @@ class type ['gene,'code] representation = object('self_type)
   method blacklist_atoms : unit -> unit
   method dont_repair_func_atoms : (atom_id * float) list -> unit
   method print_fault_localization : unit -> unit
+  method print_fix_localization : unit -> unit
 
   (** specifies mutations that are allowed and their relative weightings,
       typically according to the search parameters
@@ -548,6 +549,9 @@ let flatten_path = ref "last"
 let compiler_name = ref "gcc"
 let compiler_options = ref ""
 let trampoline_compiler_options = ref ""
+let trampoline_linker_options = ref ""
+let trampoline_nodietlibc = ref false
+let trampoline_debug = ref false
 let test_script = ref "./test.sh"
 let label_repair = ref false
 let use_subdirs = ref false
@@ -581,8 +585,10 @@ let coverage_info = ref ""
 let is_valgrind = ref false
 let partition   = ref (-1)
 
+let fix_whitelist_atoms = ref IntSet.empty
 let fix_whitelist_src_files = ref StringSet.empty
 let fix_blacklist_src_funcs = ref StringSet.empty
+let fix_blacklist_atoms = ref IntSet.empty
 
 let nht_server = ref ""
 let nht_port = ref 51000
@@ -606,7 +612,8 @@ let func_repair_binary = ref ""
 let func_repair_insert = ref ""
 let func_repair_fn_name = ref ""
 let func_repair_script = ref "funcinsert.py"
-let func_repair_stdiolib = ref "stdlibc-src/stdio_static.c"
+(*let func_repair_stdiolib = ref "stdlibc-src/stdio_static.c"*)
+let do_not_instrument = ref StringSet.empty
 
 let _ =
   options := !options @
@@ -648,8 +655,11 @@ let _ =
                "X use X as compiler command";
 
                "--compiler-opts", Arg.Set_string compiler_options, "X use X as options";
+               "--trampoline-linker-opts", Arg.Set_string trampoline_linker_options, "X use X as linker options for trampoline";
                "--trampoline-compiler-opts", Arg.Set_string trampoline_compiler_options, "X use X as compiler options for trampoline";
 
+               "--trampoline-nodietlibc", Arg.Set trampoline_nodietlibc, " disable diet libc for trampoline command";
+               "--trampoline-debug", Arg.Set trampoline_debug, " enable debug printing for trampoline command";
                "--preprocessor", Arg.Set_string preprocess_command,
                " preprocessor command. Default: __COMPILER_NAME__ -E __COMPILER_OPTIONS__" ;
 
@@ -690,6 +700,11 @@ let _ =
 
                "--blacklist-src-functions", Arg.String (fun arg -> fix_blacklist_src_funcs := StringSet.add arg !fix_blacklist_src_funcs),
                "X Statement VIDs from these functions are not valid mutation destinations (can be specified multiple times)";
+
+               "--blacklist-atoms", Arg.Int (fun arg -> fix_blacklist_atoms :=  IntSet.add arg !fix_blacklist_atoms),
+               "X Statement VIDs are not valid mutation destinations (multiple IDs can be specified)";
+               "--whitelist-atoms", Arg.Int (fun arg -> fix_whitelist_atoms :=  IntSet.add arg !fix_whitelist_atoms),
+               "X Statement VIDs are valid mutation sources (multiple IDs can be specified)";
 
                "--whitelist-src-files", Arg.String (fun arg -> fix_whitelist_src_files :=  StringSet.add arg !fix_whitelist_src_files),
                "X Statement VIDs from these files are valid mutation sources (can be specified multiple times)";
@@ -1339,11 +1354,17 @@ class virtual ['gene,'code] cachingRepresentation = object (self : ('gene,'code)
 
   method trampoline source_name exe_name =
     let base_command = self#get_trampoline_command () in
-      (*"__TRAMPOLINE_TOOL_NAME__ --hook-cflags __TRAMPOINE_COMPILER_OPTIONS__ --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "*)
+      (*"__TRAMPOLINE_TOOL_NAME__ --compiler __TRAMPOLINE_COMPILER__ --hook-cflags __TRAMPOLINE_COMPILER_OPTIONS__ --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "*)
+	let script=  ((!func_repair_script) ^
+	    if (!trampoline_nodietlibc) then " --nodietlibc " else "" )
+		^ if (!trampoline_debug) then " --debug " else ""
+		in
     let cmd = Global.replace_in_string base_command
         [
-          "__TRAMPOLINE_TOOL_NAME__", !func_repair_script ;
+		  "__TRAMPOLINE_COMPILER__", !compiler_name ;
+          "__TRAMPOLINE_TOOL_NAME__", script ;
           "__TRAMPOLINE_COMPILER_OPTIONS__", !trampoline_compiler_options ;
+          "__TRAMPOLINE_LINKER_OPTIONS__", !trampoline_linker_options ;
           "__INPUT_BINARY__", !func_repair_binary ;
           "__OUTPUT_BINARY__", exe_name ;
           "__REPAIR_SOURCE_NAME__", source_name ;
@@ -1417,11 +1438,19 @@ class virtual ['gene,'code] cachingRepresentation = object (self : ('gene,'code)
 
   method trampoline_preprocess source_name out_name =
     let base_command = self#get_trampoline_preprocess_command () in
+      (*
+	  let tcomp_opts=
+	    match !trampoline_compiler_options with
+		| "COMPILE"->Scanf.sscanf "COMPILE(%[^)]):LINK(%[^)])" (fun x y -> x^' '^y)
+		| Some(x)->x
+        in
+        *)
       (*"__TRAMPOLINE_TOOL_NAME__ --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "*)
-    let cmd = Global.replace_in_string base_command
+    let cmd = Global.replace_in_string base_command 
         [
           "__COMPILER_NAME__", !compiler_name ;
-          "__TRAMPOLINE_COMPILER_OPTIONS__", !trampoline_compiler_options ;
+          "__TRAMPOLINE_COMPILER_OPTIONS__", !trampoline_compiler_options;
+          "__TRAMPOLINE_LINKER_OPTIONS__", !trampoline_linker_options;
 		  "__FUNCREPAIR_STDLIB__",Sys.getenv("FUNC_REPAIR_STDLIB");
 		  "__PWD__",Unix.getcwd ();
           "__OUT_NAME__", out_name ;
@@ -1638,7 +1667,7 @@ class virtual ['gene,'code] cachingRepresentation = object (self : ('gene,'code)
   method private get_trampoline_command () =
     match !trampoline_command with
     | "" ->
-      "__TRAMPOLINE_TOOL_NAME__ --hook-cflags '__TRAMPOLINE_COMPILER_OPTIONS__' --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "^
+      "__TRAMPOLINE_TOOL_NAME__ --compiler __TRAMPOLINE_COMPILER__ --hook-cflags 'COMPILE(__TRAMPOLINE_COMPILER_OPTIONS__):LINK(__TRAMPOLINE_LINKER_OPTIONS__)' --bin __INPUT_BINARY__ --outbin __OUTPUT_BINARY__ --fn __REPAIR_SOURCE_NAME__ __FUNC_NAME__ "^
       "2>/dev/null >/dev/null"
     |  x -> x
 
@@ -1652,7 +1681,7 @@ class virtual ['gene,'code] cachingRepresentation = object (self : ('gene,'code)
   method private get_trampoline_preprocess_command () =
     match !preprocess_command with
     | "" ->
-      "__COMPILER_NAME__ -E __SOURCE_NAME__ -I __FUNCREPAIR_STDLIB__ -I __PWD__ __TRAMPOLINE_COMPILER_OPTIONS__ > __OUT_NAME__"
+      "__COMPILER_NAME__ -E __SOURCE_NAME__ -I __FUNCREPAIR_STDLIB__ -I __PWD__ __TRAMPOLINE_COMPILER_OPTIONS__ __TRAMPOLINE_LINKER_OPTIONS__ > __OUT_NAME__"
     | x -> x
 
   method private get_preprocess_command () =
@@ -2086,8 +2115,19 @@ class virtual ['gene,'code] faultlocRepresentation = object (self)
   method blacklist_atoms () = ()
   method dont_repair_func_atoms atoms = ()
 
+  method print_fix_localization () =
+	   debug "rep: fix_localization atoms: "; 
+       debug " size=%d " (List.length !fix_localization);
+	   debug " ["; 
+       List.iter (fun (atom,w) ->
+            debug "%d;" atom
+          ) !fix_localization ;
+	   debug "]\n";
+
   method print_fault_localization () =
-	   debug "rep: fault_localization atoms: ["; 
+	   debug "rep: fault_localization atoms:";
+       debug " size=%d " (List.length !fault_localization);
+       debug "["; 
        List.iter (fun (atom,w) ->
             debug "%d;" atom
           ) !fault_localization ;

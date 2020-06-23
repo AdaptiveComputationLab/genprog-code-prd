@@ -816,18 +816,8 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
                   if !is_valgrind then
                     "vgPlain_fmsg(%g:str);"
                   else
-				    if not !Rep.func_repair then
                     "fprintf(fout, %g:str);\n"^
                     "fflush(fout);\n"
-					else
-                    "fout = gp_fopen(%g:fout_g, %g:a_arg );\n"^
-					(*
-                    "fprintf(fout, %g:str);\n"^
-                    "fflush(fout);\n"^
-					*)
-                    "gp_fprintf(fout, %g:str);\n"^
-                    "gp_fflush(fout);\n"^
-					"gp_fclose(fout);\n"
                 in
                 let print_str =
                   if !uniq_coverage then
@@ -865,7 +855,9 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
 
     method vfunc f =
       if !found_fmsg then begin
-        if List.mem f.svar.vname do_not_instrument_these_functions then begin
+        (* pemma need to add if this is the entry function *)
+        let no_instrumentation = do_not_instrument_these_functions@(StringSet.elements !Rep.do_not_instrument) in
+        if List.mem f.svar.vname no_instrumentation then begin
           debug "cilRep: WARNING: definition of fprintf found at %s:%d\n"
             f.svar.vdecl.file f.svar.vdecl.line ;
           debug "\tcannot instrument for coverage (would be recursive)\n";
@@ -886,20 +878,11 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
               uniq_instrs
             else
               "if (fout == 0) {\n fout = fopen(%g:fout_g,%g:wb_arg);\n"^uniq_instrs^"}"
-			  (*
-			  if not !Rep.func_repair then
-              "if (fout == 0) {\n fout = fopen(%g:fout_g,%g:wb_arg);\n"^uniq_instrs^"}"
-			  else
-			  (* 
-			  note from pdr - I'm inlining the fopen/fprintf/fflush/fclose
-              "if (fout == 0) {\n fout = fopen(%g:fout_g,%g:a_arg);\n"^uniq_instrs^"\nfclose(fout);\n}"
-			  *)
-              "if (fout == 0) {\n fout = gp_fopen(%g:fout_g,%g:a_arg);\n"^uniq_instrs^"\n}"
-			  *)
           in
           let ifstmt = cstmt stmt_str
               [("uniq_array", Fv(!uniq_array_va));("fout_g",Fg coverage_outname); ("uniq_int", Fv(!uniq_int_va))]
           in
+          (*
     	  if !Rep.func_repair then begin
     	    (*    TODO PEMMA create local variable _coverage_fout and initialize it to 0
     	    *)
@@ -911,6 +894,7 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
                                   f.sbody.bstmts <- init_fout :: f.sbody.bstmts;
                                   f))
     	  end else 
+          *)
           ChangeDoChildrenPost(f,
                                (fun f ->
                                   f.sbody.bstmts <- ifstmt :: f.sbody.bstmts;
@@ -1851,12 +1835,14 @@ class virtual ['gene] cilRep  = object (self : 'self_type)
 
 	  
   method dont_repair_func_atoms atoms = 
+    if (List.length atoms) > 0 then begin
       let dont_repair = ref IntSet.empty in
 	     List.iter (fun (atom,w) -> dont_repair := IntSet.add atom !dont_repair) atoms;
       fault_localization :=
         List.filter (fun (atom,w) ->
             not (IntSet.mem atom !dont_repair)
           ) !fault_localization ;
+    end
 
   (* Use an approximation to the program equivalence relation to
    * remove duplicate edits (i.e., those that would yield semantically
@@ -3603,19 +3589,23 @@ let _ =
   fill_va_table := (fun () ->
       let vnames =
         [ "fclose"; "fflush"; "fopen"; "fprintf"; "memset"; "vgPlain_fmsg"; "_coverage_fout" ; "vgPlain_memset"
-		  ; "gp_fopen"; "gp_fclose"; "gp_fflush"; "gp_fprintf"
-		  (*; "_open"; "_open_mode"; "_write"; "_exit"; "vfprintf";  "printf"; "_close"*)
 		]
       in
       if Hashtbl.length va_table = 0 then begin
         let source_file, chan = Filename.open_temp_file "tmp" ".c" in
 		(* pemma:TODO add rep.funcrepair *)
 		if !Rep.func_repair then begin
-            Printf.fprintf chan "#include <%s>\n" !Rep.func_repair_stdiolib;
+        
 		   (* note from pdr - I'm inlining the _coverage_fout : fopen/fprintf/fflush/fclose
 		      the following global variable shouldnt be used
             Printf.fprintf chan "int _coverage_fout;\n";
 		   *)
+		   (* note from pdr - this is no longer needed!!!! 
+		    we are using gcc + dietlibc or clang for AFR now *)
+
+           (*  Printf.fprintf chan "#include <%s>\n" !Rep.func_repair_stdiolib;*)
+            Printf.fprintf chan "#include <stdio.h>\n";
+            Printf.fprintf chan "FILE * _coverage_fout;\n";
             Printf.fprintf chan "int main() { return 0; }\n";
 		end else begin
             Printf.fprintf chan "#include <stdio.h>\n";
@@ -3683,12 +3673,8 @@ let _ =
       let static_args = lfoldl (fun lst x ->
           let is_fout = x = "_coverage_fout" in
           if not (Hashtbl.mem va_table x) then begin
-		    if not !Rep.func_repair && not is_fout then 
             let vi = makeVarinfo true x void_t in
             Hashtbl.add va_table x (vi, [GVarDecl(vi,locUnknown)], is_fout)
-			else
-            let vi = makeVarinfo true x int_t in
-            Hashtbl.add va_table x (vi, [GVarDecl(vi,locUnknown)], false)
           end;
           let name = if is_fout then "fout" else x in
           let vi, _, _ = Hashtbl.find va_table x in
