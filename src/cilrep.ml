@@ -877,7 +877,10 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
             if !is_valgrind then
               uniq_instrs
             else
-              "if (fout == 0) {\n fout = fopen(%g:fout_g,%g:wb_arg);\n"^uniq_instrs^"}"
+              if not !Rep.func_repair then
+                 "if (fout == 0) {\n fout = fopen(%g:fout_g,%g:wb_arg);\n"^uniq_instrs^"}"
+	          else
+                 "if (fout == 0) {\n fout = fopen(%g:fout_g,%g:a_arg);\n"^uniq_instrs^"}"
           in
           let ifstmt = cstmt stmt_str
               [("uniq_array", Fv(!uniq_array_va));("fout_g",Fg coverage_outname); ("uniq_int", Fv(!uniq_int_va))]
