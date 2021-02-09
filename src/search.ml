@@ -80,6 +80,7 @@ let fitness_log = ref ""
 
 let disable_reduce_fix_space = ref false
 let disable_reduce_search_space = ref false
+let dump_rep_only = ref false
 
 (* The "--search adaptive" strategy interprets these strings as
  * mathematical expressions. They determine the order in which edits
@@ -147,6 +148,9 @@ let _ =
 
       "--disable-reduce-search-space", Arg.Set disable_reduce_search_space,
       " Disable search (fault) space reductions.  Default: false";
+
+	  "--oracle-dump-rep-only", Arg.Set dump_rep_only, 
+	  " Only dump representation, don't run test. Default: false";
     ]
 
 (**/**)
@@ -313,7 +317,7 @@ let brute_force_1 (original : ('a,'b) Rep.representation) incoming_pop =
      value for k. Only problem is !generations defaults to 10, which is WAY too
      deep for a brute-force search. *)
   let k = 1 in
-  debug "search: counting available mutants\n";
+  debug "search: counting available mutants [k=%d]\n" k;
   let count = fold_k_mutations k (fun n _ _ -> n + 1) 0 in
   debug "search: %d mutants in search space\n" count;
 
@@ -745,8 +749,14 @@ let oracle_search (orig : ('a,'b) Rep.representation) (starting_genome : string)
     the_repair#deserialize starting_genome
   else
     the_repair#load_genome_from_string starting_genome;
+  if !dump_rep_only then begin
+      let filename = "oracle_rep"^ !Global.extension in
+      the_repair#output_source filename ;
+      debug "ONLY Generating oracle repair for %s in '%s'" starting_genome filename
+  end else begin 
   assert(test_to_first_failure the_repair);
   note_success the_repair orig (1)
+  end
 
 (***********************************************************************)
 (** constructs a representation out of the genome as specified at the command
@@ -763,6 +773,11 @@ let pd_oracle_search (orig : ('a,'b) Rep.representation) (starting_genome : stri
     the_repair#deserialize starting_genome
   else
     the_repair#load_genome_from_string starting_genome;
+  if !dump_rep_only then begin
+      let filename = "oracle_rep"^ !Global.extension in
+      the_repair#output_source filename ;
+      debug "ONLY Generating oracle repair for %s in '%s'" starting_genome filename
+  end else begin 
   let allowed t = match t with | Positive _ -> true | Negative _ -> false in
   let fneutral = Fitness.test_to_first_failure ~allowed the_repair in
   if fneutral then
@@ -771,6 +786,7 @@ let pd_oracle_search (orig : ('a,'b) Rep.representation) (starting_genome : stri
     debug "%s was neutral and passed %d negative tests\n" (the_repair#name()) cpass
   else
     debug "%s was not neutral\n" (the_repair#name())
+  end
 
 (***********************************************************************)
 (** Takes an input file (overloading starting genome because I suck) and creates

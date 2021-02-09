@@ -3682,7 +3682,7 @@ let _ =
           let name = if is_fout then "fout" else x in
           let vi, _, _ = Hashtbl.find va_table x in
           (name, Fv vi) :: lst
-        ) [("wb_arg", Fg("wb")); ("a_arg", Fg("a"));] vnames
+        ) [("wb_arg", Fg("wb")); ("a_arg", Fg("ab"));] vnames
       in
       let cstmt stmt_str args =
         Formatcil.cStmt ("{"^stmt_str^"}") (fun _ -> failwith "no new varinfos!")  !currentLoc
