@@ -816,8 +816,11 @@ class covVisitor variant prototypes coverage_outname found_fmsg =
                   if !is_valgrind then
                     "vgPlain_fmsg(%g:str);"
                   else
+                  if !Rep.func_repair then
                     "fprintf(fout, %g:str);\n"^
                     "fflush(fout);\n"
+                  else
+                    "fprintf(fout, %g:str);\n"
                 in
                 let print_str =
                   if !uniq_coverage then
