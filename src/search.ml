@@ -238,6 +238,7 @@ let brute_force_1 (original : ('a,'b) Rep.representation) incoming_pop =
     debug "search: reduce_fix_space\n";
     original#reduce_fix_space () ;
   end;
+  original#blacklist_atoms ();
   original#print_fault_localization () ;
   original#print_fix_localization () ;
 
